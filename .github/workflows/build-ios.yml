@@ -1,0 +1,53 @@
+name: Build iOS (IPA non signé)
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Installer les dépendances
+        run: npm ci
+
+      - name: Générer le projet iOS natif
+        run: npx expo prebuild --platform ios
+
+      - name: Compiler (sans signature)
+        run: |
+          cd ios
+          WS=$(ls -d *.xcworkspace | head -n1)
+          SCHEME="${WS%.xcworkspace}"
+          xcodebuild \
+            -workspace "$WS" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Fabriquer le .ipa
+        run: |
+          cd ios
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -n1)
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry ../DroneControl.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DroneControl-ipa
+          path: DroneControl.ipa
