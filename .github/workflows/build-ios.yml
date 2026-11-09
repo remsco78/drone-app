@@ -16,6 +16,16 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Choisir la version la plus récente d'Xcode
+        run: |
+          echo "Versions d'Xcode disponibles :"
+          ls -d /Applications/Xcode*.app
+          XC=$(ls -d /Applications/Xcode_*.app | grep -vi beta | sort -V | tail -n 1)
+          echo "Xcode choisi : $XC"
+          sudo xcode-select -s "$XC/Contents/Developer"
+          xcodebuild -version
+          swift --version
+
       - name: Installer les dépendances
         run: npm ci
 
