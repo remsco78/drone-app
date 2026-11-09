@@ -7,7 +7,12 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15-intel
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, macos-15-intel]
     steps:
       - uses: actions/checkout@v4
 
@@ -59,5 +64,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: DroneControl-ipa
+          name: DroneControl-ipa-${{ matrix.os }}
           path: DroneControl.ipa
