@@ -1,5 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, StatusBar, useWindowDimensions, TouchableOpacity } from 'react-native';
+import {
+  View,
+  Text,
+  StyleSheet,
+  StatusBar,
+  useWindowDimensions,
+  TouchableOpacity,
+  ScrollView,
+} from 'react-native';
 
 // ---------------------------------------------------------------------------
 // Manette Drone pour Arduino UNO R4 WiFi (sketch drone_wifi.ino)
@@ -231,22 +239,33 @@ export default function App() {
       <StatusBar hidden />
       <View style={{ flex: 1, marginHorizontal: MARGE_X }}>
         {/* Haut gauche : informations transmises par les capteurs */}
-        <View style={[styles.infoBox, { width: W * 0.36, height: height * 0.34 }]}>
+        <View style={[styles.infoBox, { width: W * 0.38, height: height * 0.35 }]}>
           <View style={styles.infoHeader}>
             <View style={[styles.dot, { backgroundColor: connected ? '#2ecc71' : '#e74c3c' }]} />
             <Text style={styles.status}>{connected ? 'Connecté' : 'Hors ligne'}</Text>
           </View>
-          <Text style={styles.infoTitre}>Infos capteurs</Text>
+          <Text style={styles.infoTitre}>Infos capteurs (faire défiler)</Text>
           {!connected ? (
             <Text style={styles.infoVide}>En attente de la carte…</Text>
           ) : capteurs.length === 0 ? (
             <Text style={styles.infoVide}>Aucune donnée reçue</Text>
           ) : (
-            capteurs.map(([k, v]) => (
-              <Text key={k} style={styles.infoLigne}>
-                {k} : <Text style={styles.infoValeur}>{v}</Text>
-              </Text>
-            ))
+            <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator>
+              {capteurs.map(([k, v], i) => {
+                // "GPS lat" -> groupe "GPS", nom "lat"
+                const [groupe, ...reste] = k.split(' ');
+                const nom = reste.join(' ');
+                const premier = i === 0 || capteurs[i - 1][0].split(' ')[0] !== groupe;
+                return (
+                  <View key={k}>
+                    {premier && <Text style={styles.groupe}>{groupe}</Text>}
+                    <Text style={styles.infoLigne}>
+                      {nom || groupe} : <Text style={styles.infoValeur}>{v}</Text>
+                    </Text>
+                  </View>
+                );
+              })}
+            </ScrollView>
           )}
         </View>
 
@@ -301,7 +320,8 @@ const styles = StyleSheet.create({
   status: { color: '#fff', fontWeight: '700', fontSize: 13 },
   infoTitre: { color: '#6b7c93', fontSize: 11, marginTop: 6, marginBottom: 4, textTransform: 'uppercase' },
   infoVide: { color: '#6b7c93', fontSize: 13 },
-  infoLigne: { color: '#9fb0c6', fontSize: 14, marginBottom: 2 },
+  infoLigne: { color: '#9fb0c6', fontSize: 13, marginBottom: 1 },
+  groupe: { color: '#3b82f6', fontSize: 11, fontWeight: '700', marginTop: 5, textTransform: 'uppercase' },
   infoValeur: { color: '#fff', fontWeight: '700' },
   ledBtn: {
     position: 'absolute',
