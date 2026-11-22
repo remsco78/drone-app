@@ -4,7 +4,7 @@ import { StatusBar } from 'expo-status-bar';
 import Joystick from './src/Joystick';
 import Niveau from './src/Niveau';
 import Courbe from './src/Courbe';
-import { lireCapteurs, nombre, estNombrePur, unite, creerDemo } from './src/telemetrie';
+import { lireCapteurs, nombre, estNombrePur, unite, creerDemo, parGroupe, groupeDe, nomCourt, ordonner } from './src/telemetrie';
 import { exporterCourbes } from './src/exportCourbes';
 
 const BASE_URL = 'http://192.168.4.1';
@@ -24,23 +24,40 @@ const Voyant = ({ connecte, demo, style }) => (
   </View>
 );
 
-// Liste des mesures en temps réel
-const ListeCapteurs = ({ capteurs, colonnes = 1 }) => (
-  <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
-    {capteurs.length === 0 && <Text style={styles.vide}>Aucune donnée</Text>}
-    {capteurs.map(([k, v]) => (
-      <View key={k} style={[styles.ligne, { width: `${100 / colonnes}%` }]}>
-        <Text style={styles.cle} numberOfLines={1}>
-          {k}
-        </Text>
-        <Text style={styles.val}>
-          {v}
-          {estNombrePur(v) ? unite(k) : ''}
-        </Text>
-      </View>
-    ))}
-  </View>
-);
+// Mesures en temps réel, rangées par capteur (un bloc par capteur)
+const ListeCapteurs = ({ capteurs, colonnes = 1 }) => {
+  const valeurs = {};
+  for (const [k, v] of capteurs) valeurs[k] = v;
+  const blocs = parGroupe(capteurs.map(([k]) => k));
+  if (!blocs.length) return <Text style={styles.vide}>Aucune donnée</Text>;
+  return (
+    <View>
+      {blocs.map(({ groupe, cles }) => (
+        <View key={groupe.id} style={[styles.bloc, { borderLeftColor: groupe.couleur }]}>
+          <View style={styles.blocTete}>
+            <Text style={[styles.blocTitre, { color: groupe.couleur }]}>{groupe.titre}</Text>
+            <Text style={styles.blocDetail} numberOfLines={1}>
+              {groupe.detail}
+            </Text>
+          </View>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+            {cles.map((k) => (
+              <View key={k} style={[styles.ligne, { width: `${100 / colonnes}%` }]}>
+                <Text style={styles.cle} numberOfLines={1}>
+                  {nomCourt(k)}
+                </Text>
+                <Text style={styles.val}>
+                  {valeurs[k]}
+                  {estNombrePur(valeurs[k]) ? unite(k) : ''}
+                </Text>
+              </View>
+            ))}
+          </View>
+        </View>
+      ))}
+    </View>
+  );
+};
 
 export default function App() {
   const { width, height } = useWindowDimensions();
@@ -127,9 +144,10 @@ export default function App() {
   }, []);
 
   historiqueRef.current = historique;
-  const nomsCourbes = Object.keys(historique);
+  const nomsCourbes = ordonner(Object.keys(historique)); // rangées par capteur, "sans capteur" à la fin
   const courbeActive =
     choix && historique[choix] ? choix : nomsCourbes.find((k) => /alt/i.test(k)) || nomsCourbes[0];
+  const groupeActif = courbeActive ? groupeDe(courbeActive) : null;
 
   // Inclinaison pour le niveau (roulis / tangage, si la carte les envoie)
   const inclin = useMemo(() => {
@@ -195,7 +213,16 @@ export default function App() {
       {ouvert !== 'courbes' && (
         <View style={[styles.mini, { right: 14, top: 44, width: panR, height: hautMini }]}>
           <View style={styles.miniEntete}>
-            <Text style={styles.miniTitre}>Courbe · {courbeActive || '—'}</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.miniTitre} numberOfLines={1}>
+                {courbeActive || 'Courbe'}
+              </Text>
+              {groupeActif && (
+                <Text style={[styles.blocDetail, { color: groupeActif.couleur, marginLeft: 0 }]} numberOfLines={1}>
+                  Capteur : {groupeActif.titre}
+                </Text>
+              )}
+            </View>
             <TouchableOpacity style={styles.agrandir} onPress={() => basculer('courbes')}>
               <Text style={styles.agrandirTxt}>⤢</Text>
             </TouchableOpacity>
@@ -203,8 +230,9 @@ export default function App() {
           <Courbe
             points={courbeActive ? historique[courbeActive] : null}
             largeur={panR - 20}
-            hauteur={hautMini - 42}
+            hauteur={hautMini - 56}
             pas={PAS}
+            couleur={groupeActif ? groupeActif.couleur : undefined}
           />
         </View>
       )}
@@ -230,14 +258,20 @@ export default function App() {
           <View style={{ flexDirection: 'row', alignItems: 'center', height: 30 }}>
             <View style={{ flex: 1, height: 30 }}>
               <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                {nomsCourbes.map((k) => (
-                  <TouchableOpacity
-                    key={k}
-                    style={[styles.puce, k === courbeActive && styles.puceActive]}
-                    onPress={() => setChoix(k)}
-                  >
-                    <Text style={[styles.puceTxt, k === courbeActive && { color: '#fff' }]}>{k}</Text>
-                  </TouchableOpacity>
+                {parGroupe(nomsCourbes).map(({ groupe, cles }) => (
+                  <View key={groupe.id} style={{ flexDirection: 'row', alignItems: 'center' }}>
+                    <Text style={[styles.groupeEtiq, { color: groupe.couleur }]}>{groupe.titre}</Text>
+                    {cles.map((k) => (
+                      <TouchableOpacity
+                        key={k}
+                        style={[styles.puce, k === courbeActive && { backgroundColor: groupe.couleur }]}
+                        onPress={() => setChoix(k)}
+                      >
+                        <Text style={[styles.puceTxt, k === courbeActive && { color: '#0b0f14' }]}>{nomCourt(k)}</Text>
+                      </TouchableOpacity>
+                    ))}
+                    <View style={styles.separateur} />
+                  </View>
                 ))}
               </ScrollView>
             </View>
@@ -249,8 +283,16 @@ export default function App() {
               <Text style={styles.agrandirTxt}>⤡</Text>
             </TouchableOpacity>
           </View>
-          <View style={{ flex: 1, marginTop: 8 }}>
-            <CourbePleine points={courbeActive ? historique[courbeActive] : null} />
+          {groupeActif && (
+            <Text style={[styles.infoCapteur, { color: groupeActif.couleur }]} numberOfLines={1}>
+              {courbeActive} · vient du capteur : {groupeActif.titre} ({groupeActif.detail})
+            </Text>
+          )}
+          <View style={{ flex: 1, marginTop: 4 }}>
+            <CourbePleine
+              points={courbeActive ? historique[courbeActive] : null}
+              couleur={groupeActif ? groupeActif.couleur : undefined}
+            />
           </View>
         </View>
       )}
@@ -279,14 +321,14 @@ export default function App() {
 }
 
 // Courbe qui prend toute la place disponible
-function CourbePleine({ points }) {
+function CourbePleine({ points, couleur }) {
   const [taille, setTaille] = useState({ w: 0, h: 0 });
   return (
     <View
       style={{ flex: 1 }}
       onLayout={(e) => setTaille({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height })}
     >
-      {taille.w > 0 && <Courbe points={points} largeur={taille.w} hauteur={taille.h} pas={PAS * 1.6} />}
+      {taille.w > 0 && <Courbe points={points} largeur={taille.w} hauteur={taille.h} pas={PAS * 1.6} couleur={couleur} />}
     </View>
   );
 }
@@ -327,6 +369,13 @@ const styles = StyleSheet.create({
   agrandir: { backgroundColor: '#1f2937', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 2 },
   agrandirTxt: { color: '#e5e7eb', fontSize: 16 },
   centre: { position: 'absolute', alignItems: 'center' },
+  bloc: { borderLeftWidth: 3, paddingLeft: 8, marginBottom: 8 },
+  blocTete: { flexDirection: 'row', alignItems: 'baseline', marginBottom: 2 },
+  blocTitre: { fontSize: 12, fontWeight: '800' },
+  blocDetail: { color: '#6b7c93', fontSize: 10, marginLeft: 6, flexShrink: 1 },
+  groupeEtiq: { fontSize: 10, fontWeight: '800', marginRight: 6, marginLeft: 2 },
+  separateur: { width: 1, height: 18, backgroundColor: '#26313f', marginHorizontal: 6 },
+  infoCapteur: { fontSize: 11, fontWeight: '600', marginTop: 4 },
   ligne: { paddingVertical: 3, paddingRight: 10 },
   cle: { color: '#6b7c93', fontSize: 10 },
   val: { color: '#f1f5f9', fontSize: 15, fontWeight: '700' },

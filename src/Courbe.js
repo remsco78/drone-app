@@ -1,5 +1,6 @@
 import React, { useRef, useState } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet } from 'react-native';
+import { echelle, fmtEchelle } from './telemetrie';
 
 // ---------------------------------------------------------------------------
 // Courbe d'un capteur : une mesure par seconde, axe vertical de 0 au maximum
@@ -12,14 +13,6 @@ const AXE = 42; // largeur de la colonne des valeurs (fixe, à gauche)
 const BAS = 18; // hauteur réservée aux repères de temps
 const PAD = 8;
 
-// 37 -> 50 ; 0.8 -> 1 ; 130 -> 200 (graduation "ronde" juste au-dessus)
-const joli = (v) => {
-  if (v <= 0) return 1;
-  const p = Math.pow(10, Math.floor(Math.log10(v)));
-  const n = v / p;
-  return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * p;
-};
-const fmt = (v) => String(parseFloat(v.toPrecision(3)));
 const temps = (s) => (s < 60 ? `${s}s` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`);
 
 const Seg = React.memo(function Seg({ x1, y1, x2, y2, color }) {
@@ -64,15 +57,13 @@ function CourbeBase({ points, largeur, hauteur, pas, couleur = '#38bdf8' }) {
   const tN = points[n - 1].t;
   const contenuW = Math.max(zone, 8 + (tN - t0) * pas + 28);
 
-  let min = 0;
-  let max = 0;
+  let min = Infinity;
+  let max = -Infinity;
   for (const p of points) {
     if (p.v < min) min = p.v;
     if (p.v > max) max = p.v;
   }
-  const ymax = max > 0 ? joli(max) : min < 0 ? 0 : 1;
-  const ymin = min < 0 ? -joli(-min) : 0;
-  const plage = ymax - ymin || 1;
+  const { ymin, ymax, plage } = echelle(min, max);
   const X = (t) => 8 + (t - t0) * pas;
   const Y = (v) => PAD + (1 - (v - ymin) / plage) * (hInt - 2 * PAD);
   const yGrille = (f) => PAD + f * (hInt - 2 * PAD);
@@ -99,7 +90,7 @@ function CourbeBase({ points, largeur, hauteur, pas, couleur = '#38bdf8' }) {
       {/* valeurs de l'axe vertical (fixes) */}
       {[0, 0.5, 1].map((f) => (
         <Text key={f} style={[styles.axe, { top: yGrille(f) - 7 }]}>
-          {fmt(ymax - f * plage)}
+          {fmtEchelle(ymax - f * plage, plage)}
         </Text>
       ))}
 

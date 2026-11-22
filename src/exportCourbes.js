@@ -1,5 +1,6 @@
 import { Share } from 'react-native';
 import { File, Paths } from 'expo-file-system';
+import { echelle, fmtEchelle, groupeDe, ordonner } from './telemetrie';
 
 // ---------------------------------------------------------------------------
 // Export de TOUTES les courbes en une image PNG (toute la durée d'utilisation).
@@ -88,8 +89,10 @@ const PALETTE = [
   [45, 212, 191],
   [250, 204, 21],
   [255, 255, 255], // 14 blanc
+  [107, 124, 147], // 15 gris (mesures sans capteur)
 ];
-const COULEURS_COURBES = [6, 7, 8, 9, 10, 11, 12, 13];
+// couleur de chaque groupe de capteurs (indices de la palette ci-dessus)
+const COULEUR_GROUPE = { gps: 6, mpu: 7, mag: 10, carte: 8, aucun: 15 };
 
 function creerImage(w, h) {
   const px = new Uint8Array(w * h); // tout à 0 = fond
@@ -210,17 +213,11 @@ export function encoderPNG(img) {
 }
 
 // --- mise en page des courbes -------------------------------------------------
-const joli = (v) => {
-  if (v <= 0) return 1;
-  const p = Math.pow(10, Math.floor(Math.log10(v)));
-  const n = v / p;
-  return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * p;
-};
-const fmt = (v) => String(parseFloat(Number(v).toPrecision(3)));
+const fmt = (v) => String(parseFloat(Number(v).toPrecision(7)));
 const duree = (s) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
 
 export function dessinerCourbes(historique, dateTxt) {
-  const noms = Object.keys(historique).filter((k) => historique[k] && historique[k].length >= 2);
+  const noms = ordonner(Object.keys(historique).filter((k) => historique[k] && historique[k].length >= 2));
   const W = 1600;
   const CELL_W = 780;
   const CELL_H = 300;
@@ -253,23 +250,24 @@ export function dessinerCourbes(historique, dateTxt) {
     const x = MARGE + col * (CELL_W + MARGE);
     const y = HAUT + lig * (CELL_H + MARGE);
     const serie = historique[nom];
-    const couleur = COULEURS_COURBES[i % COULEURS_COURBES.length];
+    const groupe = groupeDe(nom);
+    const couleur = COULEUR_GROUPE[groupe.id];
 
     img.rect(x, y, CELL_W, CELL_H, 1);
 
-    let min = 0;
-    let max = 0;
+    let min = Infinity;
+    let max = -Infinity;
     for (const p of serie) {
       if (p.v < min) min = p.v;
       if (p.v > max) max = p.v;
     }
-    const ymax = max > 0 ? joli(max) : min < 0 ? 0 : 1;
-    const ymin = min < 0 ? -joli(-min) : 0;
-    const plage = ymax - ymin || 1;
+    const { ymin, ymax, plage } = echelle(min, max);
 
     img.texte(nom, x + 16, y + 12, 3, 4);
+    // capteur d'origine, en haut à droite, dans la couleur de son groupe
+    img.texte(groupe.titre + ' - ' + groupe.detail, x + CELL_W - 16, y + 16, 2, couleur, 'right');
     const dernier = serie[serie.length - 1].v;
-    img.texte(`MAX ${fmt(max)}  MIN ${fmt(Math.min(...serie.map((p) => p.v)))}  FIN ${fmt(dernier)}`, x + CELL_W - 16, y + 18, 2, 3, 'right');
+    img.texte(`MAX ${fmt(max)}   MIN ${fmt(min)}   FIN ${fmt(dernier)}`, x + 16, y + 38, 2, 3);
 
     const gauche = x + 92;
     const droite = x + CELL_W - 24;
@@ -281,7 +279,7 @@ export function dessinerCourbes(historique, dateTxt) {
     for (const f of [0, 0.5, 1]) {
       const yy = haut + f * (bas - haut);
       img.rect(gauche, yy - 1, droite - gauche, 2, 2);
-      img.texte(fmt(ymax - f * plage), gauche - 10, yy - 7, 2, 3, 'right');
+      img.texte(fmtEchelle(ymax - f * plage, plage), gauche - 10, yy - 7, 2, 3, 'right');
     }
     if (ymin < 0) img.rect(gauche, Y(0) - 1, droite - gauche, 3, 5);
 
