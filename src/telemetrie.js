@@ -13,12 +13,14 @@ export const lireCapteurs = (texte) =>
       return [p.slice(0, i).trim(), p.slice(i + 1).trim()];
     });
 
-// "12.4" -> 12.4 ; "abc" -> null
+// "12.4" -> 12.4 ; "12.4 m" -> 12.4 ; "180 °" -> 180 ; "abc" -> null
 export const nombre = (txt) => {
-  const s = String(txt).trim().replace(',', '.');
-  if (!/^-?\d+(\.\d+)?$/.test(s)) return null;
-  return parseFloat(s);
+  const m = String(txt).trim().replace(',', '.').match(/^-?\d+(?:\.\d+)?/);
+  return m ? parseFloat(m[0]) : null;
 };
+
+// vrai si la valeur est un nombre seul (sans unité déjà écrite par la carte)
+export const estNombrePur = (txt) => /^-?\d+(?:[.,]\d+)?$/.test(String(txt).trim());
 
 // Unité affichée derrière la valeur (d'après le nom du capteur)
 const UNITES = [

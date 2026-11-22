@@ -4,7 +4,7 @@ import { StatusBar } from 'expo-status-bar';
 import Joystick from './src/Joystick';
 import Niveau from './src/Niveau';
 import Courbe from './src/Courbe';
-import { lireCapteurs, nombre, unite, creerDemo } from './src/telemetrie';
+import { lireCapteurs, nombre, estNombrePur, unite, creerDemo } from './src/telemetrie';
 import { exporterCourbes } from './src/exportCourbes';
 
 const BASE_URL = 'http://192.168.4.1';
@@ -35,7 +35,7 @@ const ListeCapteurs = ({ capteurs, colonnes = 1 }) => (
         </Text>
         <Text style={styles.val}>
           {v}
-          {nombre(v) !== null ? unite(k) : ''}
+          {estNombrePur(v) ? unite(k) : ''}
         </Text>
       </View>
     ))}
@@ -128,7 +128,8 @@ export default function App() {
 
   historiqueRef.current = historique;
   const nomsCourbes = Object.keys(historique);
-  const courbeActive = choix && historique[choix] ? choix : nomsCourbes[0];
+  const courbeActive =
+    choix && historique[choix] ? choix : nomsCourbes.find((k) => /alt/i.test(k)) || nomsCourbes[0];
 
   // Inclinaison pour le niveau (roulis / tangage, si la carte les envoie)
   const inclin = useMemo(() => {
