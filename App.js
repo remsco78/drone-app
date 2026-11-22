@@ -1,365 +1,343 @@
-import React, { useEffect, useRef, useState } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  StatusBar,
-  useWindowDimensions,
-  TouchableOpacity,
-  ScrollView,
-} from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { View, Text, TouchableOpacity, ScrollView, StyleSheet, useWindowDimensions } from 'react-native';
+import { StatusBar } from 'expo-status-bar';
+import Joystick from './src/Joystick';
+import Niveau from './src/Niveau';
+import Courbe from './src/Courbe';
+import { lireCapteurs, nombre, unite, creerDemo } from './src/telemetrie';
 
-// ---------------------------------------------------------------------------
-// Manette Drone pour Arduino UNO R4 WiFi (sketch drone_wifi.ino)
-// Envoie 10 fois par seconde : GET http://192.168.4.1/c?t=GAZ&s=DIRECTION&b=FEUX
-//   gaz 0-255, direction 0-255 (128 = centre), feux/LED 0/1
-// La carte répond "OK;cle=valeur;cle=valeur" : les valeurs sont affichées
-// dans l'encadré "Infos capteurs".
-//
-// Disposition (téléphone en paysage) :
-//   haut gauche  : encadré infos capteurs        haut droite : bouton LED
-//   centre       : niveau d'inclinaison (roulis / tangage du capteur MPU6050)
-//   bas gauche   : joystick gaz (vers le haut)   bas droite  : joystick direction
-// ---------------------------------------------------------------------------
 const BASE_URL = 'http://192.168.4.1';
-const SEND_MS = 100;
+const SEND_MS = 100; // une commande toutes les 100 ms
 const DEADZONE = 0.06;
-const MARGE_X = 44; // évite l'encoche / la Dynamic Island en paysage
-const NB_BARRES = 7;
-const SENS_ROULIS = 1; // mettre -1 si les barres s'inclinent à l'envers
+const HISTO_MAX = 600; // 10 minutes de courbe (1 point / seconde)
+const PAS = 14; // pixels par seconde sur la courbe
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const zone = (v) => (Math.abs(v) < DEADZONE ? 0 : v);
 
-// "OK;uptime=12;batt=7.4" -> [["uptime","12"], ["batt","7.4"]]
-const lireCapteurs = (texte) =>
-  texte
-    .split(';')
-    .filter((p) => p.includes('='))
-    .map((p) => {
-      const i = p.indexOf('=');
-      return [p.slice(0, i).trim(), p.slice(i + 1).trim()];
-    });
+// Voyant de connexion : rouge = pas connecté au Wi-Fi du drone, vert = connecté
+const Voyant = ({ connecte, demo, style }) => (
+  <View style={[styles.voyant, style]} pointerEvents="none">
+    <View style={[styles.led, { backgroundColor: connecte ? '#22c55e' : '#ef4444' }]} />
+    <Text style={styles.voyantTxt}>{demo ? 'Démo' : connecte ? 'Connecté' : 'Non connecté'}</Text>
+  </View>
+);
 
-// ---------------------------------------------------------------------------
-// Niveau d'inclinaison : les barres tournent (roulis) et montent/descendent
-// (tangage) par rapport à la ligne pointillée fixe. Vert < 5°, orange < 15°.
-// ---------------------------------------------------------------------------
-function Niveau({ inclin, taille }) {
-  const roll = inclin ? clamp(inclin.roll, -45, 45) : 0;
-  const pitch = inclin ? clamp(inclin.pitch, -45, 45) : 0;
-  const ecart = Math.max(Math.abs(roll), Math.abs(pitch));
-  const couleur = !inclin ? '#2a3441' : ecart < 5 ? '#2ecc71' : ecart < 15 ? '#f59e0b' : '#ef4444';
-  const decal = (pitch / 45) * taille * 0.3;
-  return (
-    <View pointerEvents="none" style={{ width: taille, alignItems: 'center' }}>
-      <View style={{ width: taille, height: taille, alignItems: 'center', justifyContent: 'center' }}>
-        <View
-          style={{
-            alignItems: 'center',
-            gap: 5,
-            transform: [{ translateY: decal }, { rotate: `${-roll * SENS_ROULIS}deg` }],
-          }}
-        >
-          {Array.from({ length: NB_BARRES }).map((_, i) => (
-            <View
-              key={i}
-              style={{ width: taille * 0.8, height: 9, borderRadius: 4, backgroundColor: couleur }}
-            />
-          ))}
-        </View>
-        <View style={styles.repere}>
-          {Array.from({ length: 9 }).map((_, i) => (
-            <View key={i} style={styles.tiret} />
-          ))}
-        </View>
+// Liste des mesures en temps réel
+const ListeCapteurs = ({ capteurs, colonnes = 1 }) => (
+  <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+    {capteurs.length === 0 && <Text style={styles.vide}>Aucune donnée</Text>}
+    {capteurs.map(([k, v]) => (
+      <View key={k} style={[styles.ligne, { width: `${100 / colonnes}%` }]}>
+        <Text style={styles.cle} numberOfLines={1}>
+          {k}
+        </Text>
+        <Text style={styles.val}>
+          {v}
+          {nombre(v) !== null ? unite(k) : ''}
+        </Text>
       </View>
-      <Text style={styles.niveauTxt}>
-        {inclin
-          ? `Roulis ${Math.round(inclin.roll)}° · Tangage ${Math.round(inclin.pitch)}°`
-          : "Pas de capteur d'inclinaison"}
-      </Text>
-    </View>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Joystick fixe : axis 'y' = gaz (vers le haut seulement), axis 'x' = direction
-// Chaque joystick gère son propre doigt, donc les deux marchent en même temps.
-// ---------------------------------------------------------------------------
-function Stick({ axis, rayon, zoneStyle, label, onChange }) {
-  const KNOB = rayon * 0.8;
-  const course = rayon - KNOB / 2 - 4;
-  const [pos, setPos] = useState({ dx: 0, dy: 0 });
-  const [actif, setActif] = useState(false);
-  const touchId = useRef(null);
-  const origine = useRef({ x: 0, y: 0 });
-
-  const onStart = (e) => {
-    if (touchId.current !== null) return;
-    const t = e.nativeEvent.changedTouches[0];
-    touchId.current = t.identifier;
-    origine.current = { x: t.pageX, y: t.pageY };
-    setActif(true);
-  };
-
-  const onMove = (e) => {
-    if (touchId.current === null) return;
-    for (const t of e.nativeEvent.touches) {
-      if (t.identifier !== touchId.current) continue;
-      if (axis === 'y') {
-        const dy = clamp(t.pageY - origine.current.y, -course, 0);
-        setPos({ dx: 0, dy });
-        onChange(-dy / course); // 0 à 1
-      } else {
-        const dx = clamp(t.pageX - origine.current.x, -course, course);
-        setPos({ dx, dy: 0 });
-        onChange(dx / course); // -1 à 1
-      }
-    }
-  };
-
-  const onEnd = (e) => {
-    if (touchId.current === null) return;
-    for (const t of e.nativeEvent.changedTouches) {
-      if (t.identifier === touchId.current) {
-        touchId.current = null;
-        setPos({ dx: 0, dy: 0 });
-        setActif(false);
-        onChange(0);
-      }
-    }
-  };
-
-  return (
-    <View
-      style={[styles.zone, zoneStyle]}
-      onTouchStart={onStart}
-      onTouchMove={onMove}
-      onTouchEnd={onEnd}
-      onTouchCancel={onEnd}
-    >
-      <View
-        pointerEvents="none"
-        style={[styles.base, { width: rayon * 2, height: rayon * 2, borderRadius: rayon }]}
-      >
-        <View
-          style={[
-            styles.knob,
-            {
-              width: KNOB,
-              height: KNOB,
-              borderRadius: KNOB / 2,
-              backgroundColor: actif ? '#60a5fa' : '#3b82f6',
-              transform: [{ translateX: pos.dx }, { translateY: pos.dy }],
-            },
-          ]}
-        />
-      </View>
-      <Text pointerEvents="none" style={styles.zoneLabel}>
-        {label}
-      </Text>
-    </View>
-  );
-}
+    ))}
+  </View>
+);
 
 export default function App() {
   const { width, height } = useWindowDimensions();
-  const W = width - 2 * MARGE_X;
-  const rayon = Math.min(70, height * 0.17);
-
-  const [connected, setConnected] = useState(false);
-  const [led, setLed] = useState(false);
+  const [connecte, setConnecte] = useState(false);
+  const [demo, setDemo] = useState(false);
   const [capteurs, setCapteurs] = useState([]);
-  const [inclin, setInclin] = useState(null); // { roll, pitch } en degrés
-  const [gazPct, setGazPct] = useState(0);
-  const [dirPct, setDirPct] = useState(0);
+  const [historique, setHistorique] = useState({}); // { nom: [{t, v}] }
+  const [choix, setChoix] = useState(null); // capteur affiché dans la courbe
+  const [ouvert, setOuvert] = useState(null); // null | 'capteurs' | 'courbes'
 
-  const values = useRef({ gaz: 0, dir: 0 });
-  const ledRef = useRef(false);
-  const busy = useRef(false);
+  const cmd = useRef({ gaz: 0, dir: 0, pitch: 0, yaw: 0 });
+  const capteursRef = useRef([]);
+  const demoRef = useRef(false);
+  const demoGen = useRef(creerDemo());
+  const t0 = useRef(Date.now());
 
-  // Envoi périodique des commandes à la carte + lecture des capteurs
   useEffect(() => {
+    demoRef.current = demo;
+    if (demo) {
+      setConnecte(true);
+    } else {
+      setConnecte(false);
+      setCapteurs([]);
+      capteursRef.current = [];
+      setHistorique({});
+      t0.current = Date.now();
+    }
+  }, [demo]);
+
+  // Envoi des commandes + lecture des capteurs (toutes les 100 ms)
+  useEffect(() => {
+    let enCours = false;
     const id = setInterval(async () => {
-      if (busy.current) return;
-      busy.current = true;
-      const v = values.current;
-
-      const gaz = v.gaz > DEADZONE ? Math.round(clamp(v.gaz, 0, 1) * 255) : 0;
-      const dir = Math.abs(v.dir) > DEADZONE ? Math.round(128 + clamp(v.dir, -1, 1) * 127) : 128;
-      const b = ledRef.current ? 1 : 0;
-
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 400);
+      const c = cmd.current;
+      if (demoRef.current) {
+        capteursRef.current = demoGen.current({ gaz: c.gaz, dir: c.dir, pitch: c.pitch });
+        setCapteurs(capteursRef.current);
+        return;
+      }
+      if (enCours) return;
+      enCours = true;
+      const gaz = Math.round(clamp(c.gaz, 0, 1) * 255);
+      const dir = Math.round(128 + clamp(c.dir, -1, 1) * 127);
+      const ctrl = new AbortController();
+      const stop = setTimeout(() => ctrl.abort(), 400);
       try {
-        const res = await fetch(`${BASE_URL}/c?t=${gaz}&s=${dir}&b=${b}`, {
-          signal: controller.signal,
-        });
-        setConnected(res.ok);
-        if (res.ok) {
-          const texte = await res.text();
-          const liste = lireCapteurs(texte);
-          const lire = (nom) => {
-            const e = liste.find(([n]) => n === nom);
-            const x = e ? parseFloat(e[1]) : NaN;
-            return isNaN(x) ? null : x;
-          };
-          const r = lire('roulis');
-          const p = lire('tangage');
-          setInclin(r === null || p === null ? null : { roll: r, pitch: p });
-          setCapteurs(liste.filter(([n]) => n !== 'roulis' && n !== 'tangage'));
-        }
+        const r = await fetch(`${BASE_URL}/c?t=${gaz}&s=${dir}&b=0`, { signal: ctrl.signal });
+        const txt = await r.text();
+        capteursRef.current = lireCapteurs(txt);
+        setCapteurs(capteursRef.current);
+        setConnecte(true);
       } catch (e) {
-        setConnected(false);
-        setInclin(null);
+        setConnecte(false);
       } finally {
-        clearTimeout(timeout);
-        busy.current = false;
+        clearTimeout(stop);
+        enCours = false;
       }
     }, SEND_MS);
     return () => clearInterval(id);
   }, []);
 
-  const toggleLed = () => {
-    ledRef.current = !ledRef.current;
-    setLed(ledRef.current);
-  };
+  // Une mesure par seconde pour les courbes
+  useEffect(() => {
+    const id = setInterval(() => {
+      const liste = capteursRef.current;
+      if (!liste.length) return;
+      const t = Math.round((Date.now() - t0.current) / 1000);
+      setHistorique((h) => {
+        const nh = { ...h };
+        for (const [k, txt] of liste) {
+          const v = nombre(txt);
+          if (v === null) continue;
+          const serie = nh[k] ? nh[k] : [];
+          if (serie.length && serie[serie.length - 1].t === t) continue;
+          const suite = serie.concat([{ t, v }]);
+          nh[k] = suite.length > HISTO_MAX ? suite.slice(suite.length - HISTO_MAX) : suite;
+        }
+        return nh;
+      });
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
 
-  const onGaz = (v) => {
-    values.current.gaz = v;
-    setGazPct(Math.round(clamp(v, 0, 1) * 100));
-  };
-  const onDir = (v) => {
-    values.current.dir = v;
-    setDirPct(Math.round(clamp(v, -1, 1) * 100));
-  };
+  const nomsCourbes = Object.keys(historique);
+  const courbeActive = choix && historique[choix] ? choix : nomsCourbes[0];
+
+  // Inclinaison pour le niveau (roulis / tangage, si la carte les envoie)
+  const inclin = useMemo(() => {
+    const d = {};
+    for (const [k, v] of capteurs) d[k.toLowerCase()] = nombre(v);
+    return d.roulis != null && d.tangage != null ? { roll: d.roulis, pitch: d.tangage } : null;
+  }, [capteurs]);
+
+  const gazPct = Math.round(cmd.current.gaz * 100);
+
+  // --- dimensions -----------------------------------------------------------
+  const stick = clamp(Math.min(height * 0.36, width * 0.24), 100, 180);
+  const panL = clamp(width * 0.24, 150, 230);
+  const panR = clamp(width * 0.3, 190, 320);
+  // les panneaux s'arrêtent au-dessus des joysticks
+  const hautPanneau = Math.max(100, height - stick - 40 - 44 - 8);
+
+  // Joysticks (identiques dans les deux modes : ils sont masqués en grand écran)
+  const stickGauche = (
+    <Joystick
+      diametre={stick}
+      zoneStyle={{ left: 14, width: stick + 24, height: stick + 40 }}
+      formatLabel={(x, y) => `Gaz ${Math.round(clamp(y, 0, 1) * 100)}%`}
+      onChange={(x, y) => {
+        cmd.current.gaz = clamp(zone(y), 0, 1);
+        cmd.current.yaw = zone(x);
+      }}
+    />
+  );
+  const stickDroit = (
+    <Joystick
+      diametre={stick}
+      zoneStyle={{ right: 14, width: stick + 24, height: stick + 40 }}
+      formatLabel={(x, y) => `Dir ${Math.round(x * 100)}% · Av/Ar ${Math.round(y * 100)}%`}
+      onChange={(x, y) => {
+        cmd.current.dir = zone(x);
+        cmd.current.pitch = zone(y);
+      }}
+    />
+  );
 
   return (
-    <View style={styles.root}>
+    <View style={styles.racine}>
       <StatusBar hidden />
-      <View style={{ flex: 1, marginHorizontal: MARGE_X }}>
-        {/* Haut gauche : informations transmises par les capteurs */}
-        <View style={[styles.infoBox, { width: W * 0.38, height: height * 0.35 }]}>
-          <View style={styles.infoHeader}>
-            <View style={[styles.dot, { backgroundColor: connected ? '#2ecc71' : '#e74c3c' }]} />
-            <Text style={styles.status}>{connected ? 'Connecté' : 'Hors ligne'}</Text>
-          </View>
-          <Text style={styles.infoTitre}>Infos capteurs (faire défiler)</Text>
-          {!connected ? (
-            <Text style={styles.infoVide}>En attente de la carte…</Text>
-          ) : capteurs.length === 0 ? (
-            <Text style={styles.infoVide}>Aucune donnée reçue</Text>
-          ) : (
-            <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator>
-              {capteurs.map(([k, v], i) => {
-                // "GPS lat" -> groupe "GPS", nom "lat"
-                const [groupe, ...reste] = k.split(' ');
-                const nom = reste.join(' ');
-                const premier = i === 0 || capteurs[i - 1][0].split(' ')[0] !== groupe;
-                return (
-                  <View key={k}>
-                    {premier && <Text style={styles.groupe}>{groupe}</Text>}
-                    <Text style={styles.infoLigne}>
-                      {nom || groupe} : <Text style={styles.infoValeur}>{v}</Text>
-                    </Text>
-                  </View>
-                );
-              })}
-            </ScrollView>
-          )}
-        </View>
 
-        {/* Haut droite : bouton test LED */}
-        <TouchableOpacity
-          activeOpacity={0.8}
-          onPress={toggleLed}
-          style={[styles.ledBtn, { backgroundColor: led ? '#f1c40f' : '#3b4a5f' }]}
-        >
-          <Text style={[styles.ledTxt, led && { color: '#000' }]}>LED</Text>
+      {/* ---------- Écran principal ---------- */}
+      <View style={styles.haut}>
+        <TouchableOpacity style={styles.demoBtn} onPress={() => setDemo((d) => !d)}>
+          <Text style={styles.demoTxt}>{demo ? 'Démo : ON' : 'Démo : OFF'}</Text>
         </TouchableOpacity>
+        <Voyant connecte={connecte} demo={demo} />
+      </View>
 
-        {/* Centre : niveau d'inclinaison */}
-        <View style={{ position: 'absolute', left: W / 2 - 70, top: height * 0.27 }}>
-          <Niveau inclin={inclin} taille={140} />
+      {/* mini-écran gauche : capteurs en temps réel */}
+      <View style={[styles.mini, { left: 14, top: 44, width: panL, height: hautPanneau }]}>
+        <View style={styles.miniEntete}>
+          <Text style={styles.miniTitre}>Capteurs</Text>
+          <TouchableOpacity style={styles.agrandir} onPress={() => setOuvert('capteurs')}>
+            <Text style={styles.agrandirTxt}>⤢</Text>
+          </TouchableOpacity>
         </View>
+        <ScrollView style={{ flex: 1 }}>
+          <ListeCapteurs capteurs={capteurs} />
+        </ScrollView>
+      </View>
 
-        {/* Bas gauche : joystick gaz / bas droite : joystick direction */}
-        <Stick
-          axis="y"
-          rayon={rayon}
-          label={`Gaz ${gazPct} %`}
-          zoneStyle={{ left: 0, width: W * 0.34 }}
-          onChange={onGaz}
-        />
-        <Stick
-          axis="x"
-          rayon={rayon}
-          label={`Direction ${dirPct} %`}
-          zoneStyle={{ right: 0, width: W * 0.34 }}
-          onChange={onDir}
+      {/* mini-écran droit : courbes */}
+      <View style={[styles.mini, { right: 14, top: 44, width: panR, height: hautPanneau }]}>
+        <View style={styles.miniEntete}>
+          <Text style={styles.miniTitre}>Courbe · {courbeActive || '—'}</Text>
+          <TouchableOpacity style={styles.agrandir} onPress={() => setOuvert('courbes')}>
+            <Text style={styles.agrandirTxt}>⤢</Text>
+          </TouchableOpacity>
+        </View>
+        <Courbe
+          points={courbeActive ? historique[courbeActive] : null}
+          largeur={panR - 20}
+          hauteur={hautPanneau - 42}
+          pas={PAS}
         />
       </View>
+
+      {/* centre : niveau d'inclinaison */}
+      <View style={[styles.centre, { top: 44, left: panL + 24, right: panR + 24 }]} pointerEvents="none">
+        <Niveau inclin={inclin} taille={clamp(Math.min(width - panL - panR - 60, height * 0.45), 90, 190)} />
+      </View>
+
+      {stickGauche}
+      {stickDroit}
+
+      {/* ---------- Grand écran : tout visible en même temps ---------- */}
+      {ouvert && (
+        <View style={styles.plein}>
+          <Voyant connecte={connecte} demo={demo} style={{ left: 14, top: 10 }} />
+          <TouchableOpacity style={styles.fermer} onPress={() => setOuvert(null)}>
+            <Text style={styles.fermerTxt}>✕ Réduire</Text>
+          </TouchableOpacity>
+
+          <View style={styles.pleinCorps}>
+            <View style={[styles.grand, { flex: ouvert === 'capteurs' ? 1.2 : 0.8 }]}>
+              <Text style={styles.miniTitre}>Capteurs en temps réel</Text>
+              <ScrollView style={{ marginTop: 6, flex: 1 }}>
+                <ListeCapteurs capteurs={capteurs} colonnes={ouvert === 'capteurs' ? 2 : 1} />
+              </ScrollView>
+            </View>
+
+            <View style={[styles.grand, { flex: ouvert === 'courbes' ? 2 : 1.3 }]}>
+              <View style={{ height: 30 }}>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                  {nomsCourbes.map((k) => (
+                    <TouchableOpacity
+                      key={k}
+                      style={[styles.puce, k === courbeActive && styles.puceActive]}
+                      onPress={() => setChoix(k)}
+                    >
+                      <Text style={[styles.puceTxt, k === courbeActive && { color: '#fff' }]}>{k}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              </View>
+              <View style={{ flex: 1, marginTop: 8 }}>
+                <CourbePleine points={courbeActive ? historique[courbeActive] : null} />
+              </View>
+            </View>
+          </View>
+        </View>
+      )}
+    </View>
+  );
+}
+
+// Courbe qui prend toute la place disponible
+function CourbePleine({ points }) {
+  const [taille, setTaille] = useState({ w: 0, h: 0 });
+  return (
+    <View
+      style={{ flex: 1 }}
+      onLayout={(e) => setTaille({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height })}
+    >
+      {taille.w > 0 && <Courbe points={points} largeur={taille.w} hauteur={taille.h} pas={PAS * 1.6} />}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#10141a' },
-  infoBox: {
+  racine: { flex: 1, backgroundColor: '#0b0f14' },
+  haut: {
     position: 'absolute',
+    top: 8,
     left: 0,
-    top: 14,
-    borderRadius: 10,
-    borderWidth: 1.5,
-    borderColor: '#3b4a5f',
-    backgroundColor: '#161c25',
+    right: 0,
+    height: 30,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  demoBtn: {
+    position: 'absolute',
+    right: 14,
+    backgroundColor: '#1f2937',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  demoTxt: { color: '#9fb0c6', fontSize: 11, fontWeight: '600' },
+  voyant: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#111827',
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    position: 'absolute',
+  },
+  led: { width: 12, height: 12, borderRadius: 6, marginRight: 6 },
+  voyantTxt: { color: '#e5e7eb', fontSize: 12, fontWeight: '600' },
+  mini: {
+    position: 'absolute',
+    backgroundColor: '#111821',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#1f2a37',
+    padding: 8,
+  },
+  miniEntete: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
+  miniTitre: { color: '#cbd5e1', fontSize: 13, fontWeight: '700' },
+  agrandir: { backgroundColor: '#1f2937', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 2 },
+  agrandirTxt: { color: '#e5e7eb', fontSize: 16 },
+  centre: { position: 'absolute', alignItems: 'center' },
+  ligne: { paddingVertical: 3, paddingRight: 10 },
+  cle: { color: '#6b7c93', fontSize: 10 },
+  val: { color: '#f1f5f9', fontSize: 15, fontWeight: '700' },
+  vide: { color: '#6b7c93', fontSize: 12 },
+  plein: { ...StyleSheet.absoluteFillObject, backgroundColor: '#0b0f14', paddingTop: 48, paddingHorizontal: 14, paddingBottom: 12 },
+  pleinCorps: { flex: 1, flexDirection: 'row', gap: 12 },
+  grand: {
+    backgroundColor: '#111821',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#1f2a37',
     padding: 10,
   },
-  infoHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  dot: { width: 10, height: 10, borderRadius: 5 },
-  status: { color: '#fff', fontWeight: '700', fontSize: 13 },
-  infoTitre: { color: '#6b7c93', fontSize: 11, marginTop: 6, marginBottom: 4, textTransform: 'uppercase' },
-  infoVide: { color: '#6b7c93', fontSize: 13 },
-  infoLigne: { color: '#9fb0c6', fontSize: 13, marginBottom: 1 },
-  groupe: { color: '#3b82f6', fontSize: 11, fontWeight: '700', marginTop: 5, textTransform: 'uppercase' },
-  infoValeur: { color: '#fff', fontWeight: '700' },
-  ledBtn: {
+  fermer: {
     position: 'absolute',
-    right: 0,
-    top: 14,
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: '#4b5b70',
+    right: 14,
+    top: 10,
+    backgroundColor: '#1f2937',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 5,
   },
-  ledTxt: { color: '#fff', fontWeight: '800', fontSize: 15 },
-  repere: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  tiret: { width: 8, height: 2, backgroundColor: '#8fa3bd', borderRadius: 1 },
-  niveauTxt: { color: '#6b7c93', fontSize: 12, marginTop: 2, textAlign: 'center' },
-  zone: {
-    position: 'absolute',
-    bottom: 0,
-    height: '62%',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  base: {
-    borderWidth: 2.5,
-    borderColor: '#3b4a5f',
-    backgroundColor: 'rgba(59,74,95,0.25)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  knob: { shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 6, shadowOffset: { width: 0, height: 3 } },
-  zoneLabel: { position: 'absolute', bottom: 6, color: '#6b7c93', fontSize: 13 },
+  fermerTxt: { color: '#e5e7eb', fontSize: 12, fontWeight: '700' },
+  puce: { backgroundColor: '#1f2937', borderRadius: 14, paddingHorizontal: 12, paddingVertical: 5, marginRight: 6, height: 26 },
+  puceActive: { backgroundColor: '#2563eb' },
+  puceTxt: { color: '#9fb0c6', fontSize: 12, fontWeight: '600' },
 });
