@@ -5,6 +5,7 @@ import Joystick from './src/Joystick';
 import Niveau from './src/Niveau';
 import Courbe from './src/Courbe';
 import { lireCapteurs, nombre, unite, creerDemo } from './src/telemetrie';
+import { exporterCourbes } from './src/exportCourbes';
 
 const BASE_URL = 'http://192.168.4.1';
 const SEND_MS = 100; // une commande toutes les 100 ms
@@ -48,7 +49,9 @@ export default function App() {
   const [capteurs, setCapteurs] = useState([]);
   const [historique, setHistorique] = useState({}); // { nom: [{t, v}] }
   const [choix, setChoix] = useState(null); // capteur affiché dans la courbe
-  const [ouvert, setOuvert] = useState(null); // null | 'capteurs' | 'courbes'
+  const [ouvert, setOuvert] = useState(null); // null | 'capteurs' | 'courbes' (un seul à la fois)
+  const [msgExport, setMsgExport] = useState('');
+  const historiqueRef = useRef({});
 
   const cmd = useRef({ gaz: 0, dir: 0, pitch: 0, yaw: 0 });
   const capteursRef = useRef([]);
@@ -123,6 +126,7 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
+  historiqueRef.current = historique;
   const nomsCourbes = Object.keys(historique);
   const courbeActive = choix && historique[choix] ? choix : nomsCourbes[0];
 
@@ -133,125 +137,142 @@ export default function App() {
     return d.roulis != null && d.tangage != null ? { roll: d.roulis, pitch: d.tangage } : null;
   }, [capteurs]);
 
-  const gazPct = Math.round(cmd.current.gaz * 100);
 
   // --- dimensions -----------------------------------------------------------
-  const stick = clamp(Math.min(height * 0.36, width * 0.24), 100, 180);
+  const stick = clamp(Math.min(height * 0.27, width * 0.17), 80, 130);
+  const zoneW = stick + 40; // largeur réservée à chaque joystick
+  const zoneH = stick + 30; // hauteur réservée (joystick + son texte)
   const panL = clamp(width * 0.24, 150, 230);
   const panR = clamp(width * 0.3, 190, 320);
-  // les panneaux s'arrêtent au-dessus des joysticks
-  const hautPanneau = Math.max(100, height - stick - 40 - 44 - 8);
+  // les panneaux s'arrêtent au-dessus des joysticks : ils ne les cachent jamais
+  const hautMini = Math.max(90, height - zoneH - 44 - 8);
+  const gaucheBande = 14 + zoneW + 10;
+  const droiteBande = 14 + Math.max(panR, zoneW) + 10;
 
-  // Joysticks (identiques dans les deux modes : ils sont masqués en grand écran)
-  const stickGauche = (
-    <Joystick
-      diametre={stick}
-      zoneStyle={{ left: 14, width: stick + 24, height: stick + 40 }}
-      formatLabel={(x, y) => `Gaz ${Math.round(clamp(y, 0, 1) * 100)}%`}
-      onChange={(x, y) => {
-        cmd.current.gaz = clamp(zone(y), 0, 1);
-        cmd.current.yaw = zone(x);
-      }}
-    />
-  );
-  const stickDroit = (
-    <Joystick
-      diametre={stick}
-      zoneStyle={{ right: 14, width: stick + 24, height: stick + 40 }}
-      formatLabel={(x, y) => `Dir ${Math.round(x * 100)}% · Av/Ar ${Math.round(y * 100)}%`}
-      onChange={(x, y) => {
-        cmd.current.dir = zone(x);
-        cmd.current.pitch = zone(y);
-      }}
-    />
-  );
+  const lancerExport = async () => {
+    setMsgExport('Création de l’image…');
+    const m = await exporterCourbes(historiqueRef.current);
+    setMsgExport(m);
+    setTimeout(() => setMsgExport(''), 3000);
+  };
+
+  const basculer = (nom) => setOuvert((o) => (o === nom ? null : nom));
 
   return (
     <View style={styles.racine}>
       <StatusBar hidden />
 
-      {/* ---------- Écran principal ---------- */}
-      <View style={styles.haut}>
-        <TouchableOpacity style={styles.demoBtn} onPress={() => setDemo((d) => !d)}>
-          <Text style={styles.demoTxt}>{demo ? 'Démo : ON' : 'Démo : OFF'}</Text>
-        </TouchableOpacity>
-        <Voyant connecte={connecte} demo={demo} />
-      </View>
+      {/* voyant de connexion : toujours en haut à gauche, il ne bouge jamais */}
+      <Voyant connecte={connecte} demo={demo} style={{ left: 14, top: 8 }} />
 
-      {/* mini-écran gauche : capteurs en temps réel */}
-      <View style={[styles.mini, { left: 14, top: 44, width: panL, height: hautPanneau }]}>
-        <View style={styles.miniEntete}>
-          <Text style={styles.miniTitre}>Capteurs</Text>
-          <TouchableOpacity style={styles.agrandir} onPress={() => setOuvert('capteurs')}>
-            <Text style={styles.agrandirTxt}>⤢</Text>
-          </TouchableOpacity>
+      <TouchableOpacity style={styles.demoBtn} onPress={() => setDemo((d) => !d)}>
+        <Text style={styles.demoTxt}>{demo ? 'Démo : ON' : 'Démo : OFF'}</Text>
+      </TouchableOpacity>
+
+      {/* ---------- Écran normal : capteurs à gauche, courbe à droite, niveau au centre ---------- */}
+      {ouvert === null && (
+        <View style={[styles.mini, { left: 14, top: 44, width: panL, height: hautMini }]}>
+          <View style={styles.miniEntete}>
+            <Text style={styles.miniTitre}>Capteurs</Text>
+            <TouchableOpacity style={styles.agrandir} onPress={() => basculer('capteurs')}>
+              <Text style={styles.agrandirTxt}>⤢</Text>
+            </TouchableOpacity>
+          </View>
+          <ScrollView style={{ flex: 1 }}>
+            <ListeCapteurs capteurs={capteurs} />
+          </ScrollView>
         </View>
-        <ScrollView style={{ flex: 1 }}>
-          <ListeCapteurs capteurs={capteurs} />
-        </ScrollView>
-      </View>
+      )}
 
-      {/* mini-écran droit : courbes */}
-      <View style={[styles.mini, { right: 14, top: 44, width: panR, height: hautPanneau }]}>
-        <View style={styles.miniEntete}>
-          <Text style={styles.miniTitre}>Courbe · {courbeActive || '—'}</Text>
-          <TouchableOpacity style={styles.agrandir} onPress={() => setOuvert('courbes')}>
-            <Text style={styles.agrandirTxt}>⤢</Text>
-          </TouchableOpacity>
+      {ouvert === null && (
+        <View style={[styles.centre, { top: 44, left: panL + 24, right: panR + 24 }]} pointerEvents="none">
+          <Niveau inclin={inclin} taille={clamp(Math.min(width - panL - panR - 60, hautMini - 30), 70, 170)} />
         </View>
-        <Courbe
-          points={courbeActive ? historique[courbeActive] : null}
-          largeur={panR - 20}
-          hauteur={hautPanneau - 42}
-          pas={PAS}
-        />
-      </View>
+      )}
 
-      {/* centre : niveau d'inclinaison */}
-      <View style={[styles.centre, { top: 44, left: panL + 24, right: panR + 24 }]} pointerEvents="none">
-        <Niveau inclin={inclin} taille={clamp(Math.min(width - panL - panR - 60, height * 0.45), 90, 190)} />
-      </View>
+      {/* mini-écran des courbes : visible sauf quand il est ouvert en grand */}
+      {ouvert !== 'courbes' && (
+        <View style={[styles.mini, { right: 14, top: 44, width: panR, height: hautMini }]}>
+          <View style={styles.miniEntete}>
+            <Text style={styles.miniTitre}>Courbe · {courbeActive || '—'}</Text>
+            <TouchableOpacity style={styles.agrandir} onPress={() => basculer('courbes')}>
+              <Text style={styles.agrandirTxt}>⤢</Text>
+            </TouchableOpacity>
+          </View>
+          <Courbe
+            points={courbeActive ? historique[courbeActive] : null}
+            largeur={panR - 20}
+            hauteur={hautMini - 42}
+            pas={PAS}
+          />
+        </View>
+      )}
 
-      {stickGauche}
-      {stickDroit}
+      {/* ---------- Capteurs en grand : grande bande entre les deux joysticks ---------- */}
+      {ouvert === 'capteurs' && (
+        <View style={[styles.mini, { left: gaucheBande, right: droiteBande, top: 44, bottom: 10, padding: 10 }]}>
+          <View style={styles.miniEntete}>
+            <Text style={styles.miniTitre}>Capteurs en temps réel</Text>
+            <TouchableOpacity style={styles.agrandir} onPress={() => setOuvert(null)}>
+              <Text style={styles.agrandirTxt}>⤡</Text>
+            </TouchableOpacity>
+          </View>
+          <ScrollView style={{ flex: 1 }}>
+            <ListeCapteurs capteurs={capteurs} colonnes={width - gaucheBande - droiteBande > 380 ? 3 : 2} />
+          </ScrollView>
+        </View>
+      )}
 
-      {/* ---------- Grand écran : tout visible en même temps ---------- */}
-      {ouvert && (
-        <View style={styles.plein}>
-          <Voyant connecte={connecte} demo={demo} style={{ left: 14, top: 10 }} />
-          <TouchableOpacity style={styles.fermer} onPress={() => setOuvert(null)}>
-            <Text style={styles.fermerTxt}>✕ Réduire</Text>
-          </TouchableOpacity>
-
-          <View style={styles.pleinCorps}>
-            <View style={[styles.grand, { flex: ouvert === 'capteurs' ? 1.2 : 0.8 }]}>
-              <Text style={styles.miniTitre}>Capteurs en temps réel</Text>
-              <ScrollView style={{ marginTop: 6, flex: 1 }}>
-                <ListeCapteurs capteurs={capteurs} colonnes={ouvert === 'capteurs' ? 2 : 1} />
+      {/* ---------- Courbes en grand : on cache les capteurs, joysticks toujours en bas ---------- */}
+      {ouvert === 'courbes' && (
+        <View style={[styles.mini, { left: 14, right: 14, top: 44, bottom: zoneH + 6, padding: 10 }]}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', height: 30 }}>
+            <View style={{ flex: 1, height: 30 }}>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                {nomsCourbes.map((k) => (
+                  <TouchableOpacity
+                    key={k}
+                    style={[styles.puce, k === courbeActive && styles.puceActive]}
+                    onPress={() => setChoix(k)}
+                  >
+                    <Text style={[styles.puceTxt, k === courbeActive && { color: '#fff' }]}>{k}</Text>
+                  </TouchableOpacity>
+                ))}
               </ScrollView>
             </View>
-
-            <View style={[styles.grand, { flex: ouvert === 'courbes' ? 2 : 1.3 }]}>
-              <View style={{ height: 30 }}>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                  {nomsCourbes.map((k) => (
-                    <TouchableOpacity
-                      key={k}
-                      style={[styles.puce, k === courbeActive && styles.puceActive]}
-                      onPress={() => setChoix(k)}
-                    >
-                      <Text style={[styles.puceTxt, k === courbeActive && { color: '#fff' }]}>{k}</Text>
-                    </TouchableOpacity>
-                  ))}
-                </ScrollView>
-              </View>
-              <View style={{ flex: 1, marginTop: 8 }}>
-                <CourbePleine points={courbeActive ? historique[courbeActive] : null} />
-              </View>
-            </View>
+            {msgExport !== '' && <Text style={styles.msgExport}>{msgExport}</Text>}
+            <TouchableOpacity style={styles.exporter} onPress={lancerExport}>
+              <Text style={styles.exporterTxt}>⤓ Image</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.agrandir, { marginLeft: 8 }]} onPress={() => setOuvert(null)}>
+              <Text style={styles.agrandirTxt}>⤡</Text>
+            </TouchableOpacity>
+          </View>
+          <View style={{ flex: 1, marginTop: 8 }}>
+            <CourbePleine points={courbeActive ? historique[courbeActive] : null} />
           </View>
         </View>
       )}
+
+      {/* joysticks : en dernier = toujours au-dessus, toujours utilisables */}
+      <Joystick
+        diametre={stick}
+        zoneStyle={{ left: 10, width: zoneW, height: zoneH }}
+        formatLabel={(x, y) => `Gaz ${Math.round(clamp(y, 0, 1) * 100)}%`}
+        onChange={(x, y) => {
+          cmd.current.gaz = clamp(zone(y), 0, 1);
+          cmd.current.yaw = zone(x);
+        }}
+      />
+      <Joystick
+        diametre={stick}
+        zoneStyle={{ right: 10, width: zoneW, height: zoneH }}
+        formatLabel={(x, y) => `Dir ${Math.round(x * 100)}% · Av ${Math.round(y * 100)}%`}
+        onChange={(x, y) => {
+          cmd.current.dir = zone(x);
+          cmd.current.pitch = zone(y);
+        }}
+      />
     </View>
   );
 }
@@ -271,18 +292,9 @@ function CourbePleine({ points }) {
 
 const styles = StyleSheet.create({
   racine: { flex: 1, backgroundColor: '#0b0f14' },
-  haut: {
-    position: 'absolute',
-    top: 8,
-    left: 0,
-    right: 0,
-    height: 30,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
   demoBtn: {
     position: 'absolute',
+    top: 10,
     right: 14,
     backgroundColor: '#1f2937',
     borderRadius: 12,
@@ -318,26 +330,10 @@ const styles = StyleSheet.create({
   cle: { color: '#6b7c93', fontSize: 10 },
   val: { color: '#f1f5f9', fontSize: 15, fontWeight: '700' },
   vide: { color: '#6b7c93', fontSize: 12 },
-  plein: { ...StyleSheet.absoluteFillObject, backgroundColor: '#0b0f14', paddingTop: 48, paddingHorizontal: 14, paddingBottom: 12 },
-  pleinCorps: { flex: 1, flexDirection: 'row', gap: 12 },
-  grand: {
-    backgroundColor: '#111821',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#1f2a37',
-    padding: 10,
-  },
-  fermer: {
-    position: 'absolute',
-    right: 14,
-    top: 10,
-    backgroundColor: '#1f2937',
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 5,
-  },
-  fermerTxt: { color: '#e5e7eb', fontSize: 12, fontWeight: '700' },
   puce: { backgroundColor: '#1f2937', borderRadius: 14, paddingHorizontal: 12, paddingVertical: 5, marginRight: 6, height: 26 },
   puceActive: { backgroundColor: '#2563eb' },
+  exporter: { backgroundColor: '#2563eb', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 5, marginLeft: 8 },
+  exporterTxt: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  msgExport: { color: '#9fb0c6', fontSize: 11, marginLeft: 8 },
   puceTxt: { color: '#9fb0c6', fontSize: 12, fontWeight: '600' },
 });
