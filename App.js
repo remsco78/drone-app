@@ -103,10 +103,11 @@ export default function App() {
       enCours = true;
       const gaz = Math.round(clamp(c.gaz, 0, 1) * 255);
       const dir = Math.round(128 + clamp(c.dir, -1, 1) * 127);
+      const avant = Math.round(128 + clamp(c.pitch, -1, 1) * 127); // stick droit : avant (>128) / arrière (<128)
       const ctrl = new AbortController();
       const stop = setTimeout(() => ctrl.abort(), 400);
       try {
-        const r = await fetch(`${BASE_URL}/c?t=${gaz}&s=${dir}&b=0`, { signal: ctrl.signal });
+        const r = await fetch(`${BASE_URL}/c?t=${gaz}&s=${dir}&p=${avant}&b=0`, { signal: ctrl.signal });
         const txt = await r.text();
         capteursRef.current = lireCapteurs(txt);
         setCapteurs(capteursRef.current);
