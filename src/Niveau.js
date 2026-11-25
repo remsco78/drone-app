@@ -16,7 +16,7 @@ export default function Niveau({ inclin, taille }) {
   const couleur = !inclin ? '#2a3441' : ecart < 5 ? '#2ecc71' : ecart < 15 ? '#f59e0b' : '#ef4444';
   const decal = (pitch / 45) * taille * 0.3;
   return (
-    <View pointerEvents="none" style={{ width: taille, alignItems: 'center' }}>
+    <View pointerEvents="none" style={{ width: Math.max(taille, 170), alignItems: 'center' }}>
       <View style={{ width: taille, height: taille * 0.8, alignItems: 'center', justifyContent: 'center' }}>
         <View
           style={{

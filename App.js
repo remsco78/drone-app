@@ -4,7 +4,8 @@ import { StatusBar } from 'expo-status-bar';
 import Joystick from './src/Joystick';
 import Niveau from './src/Niveau';
 import Courbe from './src/Courbe';
-import { lireCapteurs, nombre, estNombrePur, unite, creerDemo, parGroupe, groupeDe, nomCourt, ordonner } from './src/telemetrie';
+import { MoteursMini, MoteursPanel, BarreStationnaire } from './src/Moteurs';
+import { lireCapteurs, nombre, estNombrePur, unite, creerDemo, parGroupe, groupeDe, nomCourt, ordonner, moteursDe } from './src/telemetrie';
 import { exporterCourbes } from './src/exportCourbes';
 
 const BASE_URL = 'http://192.168.4.1';
@@ -15,6 +16,37 @@ const PAS = 14; // pixels par seconde sur la courbe
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const zone = (v) => (Math.abs(v) < DEADZONE ? 0 : v);
+
+// Répartition de la puissance sur les 4 moteurs (en %), comme un quadricoptère :
+// [avant gauche, avant droite, arrière gauche, arrière droite]
+//   g = gaz 0..1 ; r = gauche/droite -1..1 ; p = avant/arrière -1..1
+const K = 0.5;
+const melange = (g, r, p) =>
+  [g * (1 + K * r - K * p), g * (1 - K * r - K * p), g * (1 + K * r + K * p), g * (1 - K * r + K * p)].map((v) =>
+    Math.round(clamp(v, 0, 1) * 100)
+  );
+
+// Ce qu'on envoie aux moteurs, selon le mode :
+//  - joysticks : gaz du stick gauche + inclinaison du stick droit
+//  - verrouillé (stationnaire ou valeurs imposées) : les 4 valeurs restent figées ;
+//    tant que le stick droit est touché, les moteurs suivent le stick (autour du gaz verrouillé),
+//    et dès qu'il est relâché, ils reviennent aux valeurs verrouillées
+//  - arrêt : tout à 0 jusqu'à ce que le stick de gaz soit revenu à 0
+function calculerMoteurs(c, mo) {
+  if (mo.arret) {
+    if (c.gaz <= 0.02) mo.arret = false;
+    else return { m: [0, 0, 0, 0], surch: false, eff: { gaz: 0, dir: 0, pitch: 0 } };
+  }
+  if (mo.type !== 'joysticks' && mo.verrou) {
+    const gref = mo.verrou.reduce((a, b) => a + b, 0) / 400;
+    if (c.dir === 0 && c.pitch === 0) {
+      return { m: mo.verrou, surch: false, eff: { gaz: gref, dir: 0, pitch: 0 } };
+    }
+    return { m: melange(gref, c.dir, c.pitch), surch: true, eff: { gaz: gref, dir: c.dir, pitch: c.pitch } };
+  }
+  const g = clamp(c.gaz, 0, 1);
+  return { m: melange(g, c.dir, c.pitch), surch: false, eff: { gaz: g, dir: c.dir, pitch: c.pitch } };
+}
 
 // Voyant de connexion : rouge = pas connecté au Wi-Fi du drone, vert = connecté
 const Voyant = ({ connecte, demo, style }) => (
@@ -66,7 +98,13 @@ export default function App() {
   const [capteurs, setCapteurs] = useState([]);
   const [historique, setHistorique] = useState({}); // { nom: [{t, v}] }
   const [choix, setChoix] = useState(null); // capteur affiché dans la courbe
-  const [ouvert, setOuvert] = useState(null); // null | 'capteurs' | 'courbes' (un seul à la fois)
+  const [ouvert, setOuvert] = useState(null); // null | 'capteurs' | 'courbes' | 'moteurs' (un seul à la fois)
+  const [modeM, setModeM] = useState({ type: 'joysticks', verrou: null }); // joysticks | stationnaire | manuel
+  const [surcharge, setSurcharge] = useState(false); // stick droit utilisé pendant un verrouillage
+  const [sortie, setSortie] = useState([0, 0, 0, 0]); // dernières puissances envoyées (%)
+  const [msgM, setMsgM] = useState('');
+  const modeRef = useRef({ type: 'joysticks', verrou: null, arret: false });
+  const sortieRef = useRef([0, 0, 0, 0]);
   const [msgExport, setMsgExport] = useState('');
   const historiqueRef = useRef({});
 
@@ -94,20 +132,21 @@ export default function App() {
     let enCours = false;
     const id = setInterval(async () => {
       const c = cmd.current;
+      const { m, surch, eff } = calculerMoteurs(c, modeRef.current);
+      sortieRef.current = m;
+      setSortie((o) => (o.join() === m.join() ? o : m));
+      setSurcharge((o) => (o === surch ? o : surch));
       if (demoRef.current) {
-        capteursRef.current = demoGen.current({ gaz: c.gaz, dir: c.dir, pitch: c.pitch });
+        capteursRef.current = demoGen.current({ gaz: eff.gaz, dir: eff.dir, pitch: eff.pitch, moteurs: m });
         setCapteurs(capteursRef.current);
         return;
       }
       if (enCours) return;
       enCours = true;
-      const gaz = Math.round(clamp(c.gaz, 0, 1) * 255);
-      const dir = Math.round(128 + clamp(c.dir, -1, 1) * 127);
-      const avant = Math.round(128 + clamp(c.pitch, -1, 1) * 127); // stick droit : avant (>128) / arrière (<128)
       const ctrl = new AbortController();
       const stop = setTimeout(() => ctrl.abort(), 400);
       try {
-        const r = await fetch(`${BASE_URL}/c?t=${gaz}&s=${dir}&p=${avant}&b=0`, { signal: ctrl.signal });
+        const r = await fetch(`${BASE_URL}/c?m1=${m[0]}&m2=${m[1]}&m3=${m[2]}&m4=${m[3]}&b=0`, { signal: ctrl.signal });
         const txt = await r.text();
         capteursRef.current = lireCapteurs(txt);
         setCapteurs(capteursRef.current);
@@ -178,6 +217,31 @@ export default function App() {
 
   const basculer = (nom) => setOuvert((o) => (o === nom ? null : nom));
 
+  // --- moteurs : verrouillage, valeurs imposées, arrêt ---------------------
+  const prevenir = (txt) => {
+    setMsgM(txt);
+    setTimeout(() => setMsgM(''), 2500);
+  };
+  const verrouiller = (type, vals) => {
+    modeRef.current = { type, verrou: vals, arret: false };
+    setModeM({ type, verrou: vals });
+  };
+  const rendre = () => {
+    modeRef.current = { type: 'joysticks', verrou: null, arret: false };
+    setModeM({ type: 'joysticks', verrou: null });
+  };
+  const stationnaire = () => {
+    if (modeRef.current.type === 'stationnaire') return rendre();
+    const v = sortieRef.current;
+    if (v.every((x) => x === 0)) return prevenir('Moteurs à 0 % : rien à figer.');
+    verrouiller('stationnaire', [...v]);
+  };
+  const arreter = () => {
+    modeRef.current = { type: 'joysticks', verrou: null, arret: true };
+    setModeM({ type: 'joysticks', verrou: null });
+  };
+  const valeursM = connecte || demo ? moteursDe(capteurs) || sortie : null;
+
   return (
     <View style={styles.racine}>
       <StatusBar hidden />
@@ -190,7 +254,7 @@ export default function App() {
       </TouchableOpacity>
 
       {/* ---------- Écran normal : capteurs à gauche, courbe à droite, niveau au centre ---------- */}
-      {ouvert === null && (
+      {(ouvert === null || ouvert === 'moteurs') && (
         <View style={[styles.mini, { left: 14, top: 44, width: panL, height: hautMini }]}>
           <View style={styles.miniEntete}>
             <Text style={styles.miniTitre}>Capteurs</Text>
@@ -204,9 +268,49 @@ export default function App() {
         </View>
       )}
 
+      {/* centre : niveau en haut, bandeau Stationnaire juste en dessous */}
       {ouvert === null && (
-        <View style={[styles.centre, { top: 44, left: panL + 24, right: panR + 24 }]} pointerEvents="none">
-          <Niveau inclin={inclin} taille={clamp(Math.min(width - panL - panR - 60, hautMini - 30), 70, 170)} />
+        <View
+          style={[styles.centre, { top: 44, left: panL + 24, right: panR + 24, height: hautMini, justifyContent: 'space-between' }]}
+          pointerEvents="box-none"
+        >
+          <Niveau inclin={inclin} taille={clamp(Math.min(width - panL - panR - 60, hautMini - 90), 60, 150)} />
+          <BarreStationnaire
+            mode={modeM.type}
+            surcharge={surcharge}
+            style={{ alignSelf: 'stretch' }}
+            onStationnaire={() => (modeM.type === 'joysticks' ? stationnaire() : rendre())}
+          />
+        </View>
+      )}
+
+      {/* régulateur de vitesse des moteurs : en bas, entre les deux joysticks */}
+      {ouvert === null && (
+        <View style={[styles.mini, { left: zoneW + 18, right: zoneW + 18, bottom: 10, height: zoneH - 10 }]}>
+          <MoteursMini valeurs={valeursM} mode={modeM.type} surcharge={surcharge} onAgrandir={() => basculer('moteurs')} />
+        </View>
+      )}
+
+      {/* régulateur en grand : colonne au centre, les mini-écrans restent de chaque côté */}
+      {ouvert === 'moteurs' && (
+        <View style={[styles.mini, { left: 14 + panL + 10, right: 14 + panR + 10, top: 44, bottom: 10, padding: 10 }]}>
+          <MoteursPanel
+            valeurs={valeursM}
+            mode={modeM.type}
+            verrou={modeM.verrou}
+            surcharge={surcharge}
+            onValider={(v) => verrouiller('manuel', v)}
+            onStationnaire={stationnaire}
+            onRendre={rendre}
+            onStop={arreter}
+            onFermer={() => setOuvert(null)}
+          />
+        </View>
+      )}
+
+      {msgM !== '' && (
+        <View style={styles.toast} pointerEvents="none">
+          <Text style={styles.toastTxt}>{msgM}</Text>
         </View>
       )}
 
@@ -370,6 +474,8 @@ const styles = StyleSheet.create({
   agrandir: { backgroundColor: '#1f2937', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 2 },
   agrandirTxt: { color: '#e5e7eb', fontSize: 16 },
   centre: { position: 'absolute', alignItems: 'center' },
+  toast: { position: 'absolute', top: 8, left: 0, right: 0, alignItems: 'center' },
+  toastTxt: { backgroundColor: '#78350f', color: '#fde68a', fontSize: 12, fontWeight: '600', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 4, overflow: 'hidden' },
   bloc: { borderLeftWidth: 3, paddingLeft: 8, marginBottom: 8 },
   blocTete: { flexDirection: 'row', alignItems: 'baseline', marginBottom: 2 },
   blocTitre: { fontSize: 12, fontWeight: '800' },

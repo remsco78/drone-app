@@ -30,6 +30,7 @@ const UNITES = [
   ['temp', ' °C'],
   ['roulis', '°'],
   ['tangage', '°'],
+  ['moteur', ' %'],
 ];
 export const unite = (nom) => {
   const n = nom.toLowerCase();
@@ -51,6 +52,13 @@ export const GROUPES = [
     test: (k) => /^(accel|gyro)\b/i.test(k) || /^(roulis|tangage)$/i.test(k),
   },
   { id: 'mag', titre: 'BMM150', detail: 'magnétomètre (boussole)', couleur: '#a78bfa', test: (k) => /^mag\b/i.test(k) },
+  {
+    id: 'mot',
+    titre: 'Moteurs',
+    detail: 'puissance commandée aux 4 ESC (pas une mesure)',
+    couleur: '#fb7185',
+    test: (k) => /^moteur\b/i.test(k),
+  },
   { id: 'carte', titre: 'Carte Arduino', detail: 'temps de fonctionnement', couleur: '#22c55e', test: (k) => /^carte\b/i.test(k) },
   { id: 'aucun', titre: 'Sans capteur', detail: 'pas encore de capteur branché', couleur: '#6b7c93', test: () => true },
 ];
@@ -58,8 +66,22 @@ export const GROUPES = [
 export const groupeDe = (cle) => GROUPES.find((g) => g.test(cle));
 
 // "GPS lat" -> "lat" ; "Mag cap" -> "cap" ; "Accel x" reste "Accel x"
+export const NOMS_MOTEURS = ['avant gauche', 'avant droite', 'arrière gauche', 'arrière droite'];
+
+// Les 4 puissances (en %) que la carte dit appliquer : [m1, m2, m3, m4] ou null si elle ne les envoie pas
+export const moteursDe = (capteurs) => {
+  const d = {};
+  for (const [k, v] of capteurs) d[k.toLowerCase()] = nombre(v);
+  const m = [1, 2, 3, 4].map((i) => d[`moteur ${i}`]);
+  return m.every((v) => v != null) ? m : null;
+};
+
 export const nomCourt = (cle) => {
   const g = groupeDe(cle);
+  if (g && g.id === 'mot') {
+    const i = parseInt(cle.replace(/\D+/g, ''), 10);
+    return NOMS_MOTEURS[i - 1] ? `${i} · ${NOMS_MOTEURS[i - 1]}` : cle;
+  }
   if (g && (g.id === 'gps' || g.id === 'mag' || g.id === 'carte')) {
     const reste = cle.replace(/^\S+\s*/, '');
     return reste || cle;
@@ -135,7 +157,7 @@ export function creerDemo() {
   let tangage = 0;
   let t = 0;
 
-  // c = { gaz: 0..1, dir: -1..1, pitch: -1..1 }
+  // c = { gaz: 0..1, dir: -1..1, pitch: -1..1, moteurs?: [4 puissances en %] }
   return (c) => {
     t += 0.1;
     alt += (c.gaz * 40 - alt) * 0.03;
@@ -184,6 +206,7 @@ export function creerDemo() {
       ['Mag x', `${f(magX, 1)} µT`],
       ['Mag y', `${f(magY, 1)} µT`],
       ['Mag z', `${f(magZ, 1)} µT`],
+      ...(c.moteurs ? c.moteurs.map((v, i) => [`Moteur ${i + 1}`, String(v)]) : []),
       // pas de capteur pour ces deux-là aujourd'hui : fin de liste
       ['Batterie', f(batt, 2)],
       ['Temp', f(24 + c.gaz * 6, 1)],
